@@ -1,6 +1,7 @@
 import asyncio
 import random
 import os
+import sqlite3
 from datetime import datetime
 from aiogram import Bot, Dispatcher, F
 from aiogram.types import Message, FSInputFile
@@ -9,61 +10,96 @@ from PIL import Image, ImageDraw, ImageFont
 
 # --- НАСТРОЙКИ ---
 TOKEN = ""
-TEMPLATE_PATH = "templates/child-sert.png"  # Путь к картинке-шаблону
-FONT_PATH = "templates/default.ttf"          # Путь к шрифту
-FONT_SIZE = 72
+TEMPLATE_PATH = "template.jpg"
+FONT_PATH = "font.ttf"
+FONT_SIZE = 60
 
+# --- РАБОТА С БАЗОЙ ДАННЫХ ---
+def init_db():
+    conn = sqlite3.connect('database.db')
+    cursor = conn.cursor()
+    cursor.execute('''
+        CREATE TABLE IF NOT EXISTS certificates (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            user_id INTEGER,
+            full_name TEXT,
+            cert_number TEXT UNIQUE,
+            issue_date TEXT
+        )
+    ''')
+    conn.commit()
+    conn.close()
+
+def save_certificate(user_id, name, cert_number):
+    conn = sqlite3.connect('database.db')
+    cursor = conn.cursor()
+    cursor.execute(
+        "INSERT INTO certificates (user_id, full_name, cert_number, issue_date) VALUES (?, ?, ?, ?)",
+        (user_id, name, cert_number, datetime.now().strftime("%Y-%m-%d %H:%M:%S"))
+    )
+    conn.commit()
+    conn.close()
+
+# --- ЛОГИКА ГЕНЕРАЦИИ ---
+def generate_certificate(name: str):
+    img = Image.open(TEMPLATE_PATH)
+    draw = ImageDraw.Draw(img)
+    font = ImageFont.truetype(FONT_PATH, FONT_SIZE)
+    
+    # Генерируем уникальный номер
+    cert_id = f"CERT-{random.randint(100000, 999999)}"
+    
+    # Координаты (настройте под свой шаблон)
+    draw.text((img.width // 2, img.height // 2), name, font=font, fill="black", anchor="mm")
+    draw.text((img.width // 2, img.height - 150), f"№ {cert_id}", font=font, fill="gray", anchor="mm")
+    
+    output_path = f"temp_{cert_id}.png"
+    img.save(output_path)
+    return output_path, cert_id
+
+# --- БОТ ---
 bot = Bot(token=TOKEN)
 dp = Dispatcher()
 
-def generate_certificate(name: str):
-    # Загружаем шаблон
-    img = Image.open(TEMPLATE_PATH)
-    draw = ImageDraw.Draw(img)
-    
-    # Загружаем шрифт
-    font = ImageFont.truetype(FONT_PATH, FONT_SIZE)
-    
-    # Генерируем уникальный номер (например: 2024-XXXX)
-    cert_id = f"{datetime.now().year}-{random.randint(1000, 9999)}"
-    
-    # Координаты (нужно подобрать под ваш шаблон)
-    name_pos = (img.width // 2, img.height // 2 - 30)
-    id_pos = (img.width // 2, img.height - 100)
-    
-    # Пишем текст (anchor="mm" выравнивает по центру)
-    draw.text(name_pos, name, font=font, fill="black", anchor="mm")
-    draw.text(id_pos, f"ID: {cert_id}", font=font, fill="gray", anchor="mm")
-    
-    # Сохраняем временный файл
-    output_path = f"cert_{cert_id}.png"
-    img.save(output_path)
-    return output_path
-
 @dp.message(Command("start"))
 async def start_cmd(message: Message):
-    await message.answer("Привет! Введи свои ФИО, и я пришлю тебе именной сертификат.")
+    await message.answer("Введите ФИО для получения сертификата:")
 
 @dp.message(F.text)
 async def handle_name(message: Message):
-    status_msg = await message.answer("Генерирую сертификат, подождите...")
+    # Проверяем, что есть и текст, и данные пользователя
+    if message.text is None or message.from_user is None:
+        return
+
+    # Теперь Pylance видит, что message.from_user точно существует (не None)
+    user_id = message.from_user.id 
+    user_full_name = message.text
+
+    status_msg = await message.answer("⏳ Генерирую и записываю в базу...")
     
     try:
-        # Создаем сертификат
-        file_path = generate_certificate(message.text)
+        # Генерация
+        file_path, cert_number = generate_certificate(user_full_name)
         
-        # Отправляем файл пользователю
+        # Сохранение (теперь user_id гарантированно число)
+        save_certificate(user_id, user_full_name, cert_number)
+        
         photo = FSInputFile(file_path)
-        await message.answer_photo(photo, caption=f"Готово! Ваш личный сертификат, {message.text}.")
+        await message.answer_photo(
+            photo, 
+            caption=f"Ваш сертификат успешно выдан!\nНомер: {cert_number}"
+        )
         
-        # Удаляем временный файл
-        os.remove(file_path)
+        if os.path.exists(file_path):
+            os.remove(file_path)
+            
     except Exception as e:
         await message.answer(f"Произошла ошибка: {e}")
     finally:
         await status_msg.delete()
 
 async def main():
+    init_db() # Создаем таблицу при запуске
     await dp.start_polling(bot)
 
 if __name__ == "__main__":
